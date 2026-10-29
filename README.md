@@ -82,4 +82,8 @@ No [Wokwi](https://wokwi.com/esp32), crie um projeto **ESP32 + MicroPython** e c
 
 ### Evidência da conexão Wi-Fi
 <!-- Substitua pelo print do REPL mostrando o IP obtido -->
-![Conexão Wi-Fi](docs/evidencia_wifi.png)
+
+https://wokwi.com/projects/479258817358709761
+
+Imagem em anexo na pasta "docs"
+
