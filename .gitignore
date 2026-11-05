@@ -1,0 +1,13 @@
+# Credenciais do Wi-Fi — nunca vão para o GitHub
+firmware/config.py
+config.py
+
+# Pacotes recebidos pelo servidor de teste local
+backend/leituras_recebidas.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

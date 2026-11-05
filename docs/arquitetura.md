@@ -10,7 +10,7 @@ flowchart LR
         S2["Potenciômetro<br/>GPIO 34 · ADC"]
         A1["LED digital<br/>GPIO 2"]
         A2["LED PWM<br/>GPIO 4"]
-        MCU["ESP32<br/>boot.py · main.py"]
+        MCU["ESP32<br/>boot.py · main.py<br/>fila offline · média móvel"]
         S1 --> MCU
         S2 --> MCU
         MCU --> A1
@@ -21,7 +21,7 @@ flowchart LR
     DB[("🗄️ BD Relacional<br/>tabelas de dispositivos<br/>e leituras")]
     DASH["📊 Dashboard<br/>gráficos e indicadores"]
 
-    MCU -- "Wi-Fi · HTTP POST<br/>{dispositivo, adc, tensão,<br/>botão, timestamp}" --> API
+    MCU -- "Wi-Fi · urequests.post()<br/>JSON {dispositivo, seq, adc,<br/>média, tensão, botão, timestamp}" --> API
     API -- "INSERT (SQL)" --> DB
     DB -- "SELECT (SQL)" --> DASH
 ```
@@ -31,7 +31,7 @@ flowchart LR
 | Bloco | Responsabilidade | Tecnologia (proposta) |
 |---|---|---|
 | **Hardware** | Ler sensores, acionar atuadores e enviar as leituras pela rede | ESP32 + MicroPython |
-| **API Backend** | Receber as leituras, validar e gravar no banco; expor dados para o dashboard | A definir (ex.: Flask / FastAPI) |
+| **API Backend** | Receber as leituras, validar e gravar no banco; expor dados para o dashboard | Servidor de teste: `backend/servidor_teste.py` (stdlib). Definitivo: a definir (ex.: Flask / FastAPI) |
 | **BD Relacional** | Armazenar dispositivos e histórico de leituras | A definir (ex.: PostgreSQL / MySQL) |
 | **Dashboard** | Exibir leituras em tempo quase real e histórico | A definir (ex.: Streamlit / Grafana) |
 
@@ -43,3 +43,10 @@ flowchart LR
 | LED analógico | 4 | PWM 5000 Hz | duty 0–1023 |
 | Botão | 15 | `Pin.IN` + `PULL_UP` | 0 = pressionado, 1 = solto |
 | Potenciômetro | 34 (ADC1_CH6) | ADC `ATTN_11DB` | 0–4095 (0–3,3 V) |
+
+## Estruturas de dados no firmware
+
+| Estrutura | Arquivo | Uso | Custo |
+|---|---|---|---|
+| `FilaCircular` (FIFO, capacidade 50) | `firmware/estruturas.py` | Guarda os pacotes ainda não confirmados pela API; reenvio em ordem quando a rede volta | O(1) por operação, memória fixa |
+| `JanelaMovel` (N = 10) | `firmware/estruturas.py` | Média móvel do ADC; suaviza o controle do LED PWM | O(1) por leitura, memória fixa |
