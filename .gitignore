@@ -1,0 +1,24 @@
+# Credenciais do Wi-Fi — nunca versionar
+firmware/config.py
+config.py
+
+# Saída do servidor de teste
+backend/leituras_recebidas.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editores / SO
+.micropico
+Thumbs.db
+.DS_Store
+
+# Material da disciplina (não publicar no repositório)
+Guia de Configura*.pdf
+Projeto AV2*.pdf
+
+# Rascunhos e testes locais
+_rascunhos/
