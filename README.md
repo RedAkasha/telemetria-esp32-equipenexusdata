@@ -141,15 +141,11 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 ![Botões emitindo senhas e display mostrando a senha atual](docs/img/circuito_funcionando.gif)
 -->
 
-<!--
 ### Envio dos pacotes JSON (REPL do ESP32)
 ![REPL mostrando os pacotes enviados e a fila de contingência esvaziando](docs/img/evidencia_envio_repl.png)
--->
 
-<!--
 ### Pacotes recebidos pelo servidor de teste
 ![Terminal do servidor de teste com as respostas 201](docs/img/evidencia_servidor.png)
--->
 
 ### Conexão Wi-Fi (simulador Wokwi)
 ![REPL do Wokwi mostrando o IP obtido](docs/evidencia_wifi.jpg)
