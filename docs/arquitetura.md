@@ -23,12 +23,12 @@ flowchart LR
         MCU --> FILA
     end
 
-    API["⚙️ API Backend<br/>REST (HTTP/JSON)<br/>recebe e valida pacotes"]
-    DB[("🗄️ BD Relacional<br/>senhas, atendimentos<br/>e telemetria")]
+    API["⚙️ API Backend (FastAPI)<br/>valida pacotes · tabelas hash O(1)<br/>idempotência · saldos"]
+    DB[("🗄️ SQLite<br/>transações, senhas, saldos,<br/>telemetria e auditoria")]
     DASH["📊 Dashboard<br/>fila e métricas"]
 
     FILA -- "Wi-Fi · urequests.post()<br/>JSON {dispositivo, seq, tipo,<br/>senha, timestamp}" --> API
-    API -- "INSERT (SQL)" --> DB
+    API -- "BEGIN IMMEDIATE … COMMIT" --> DB
     DB -- "SELECT (SQL)" --> DASH
 ```
 
@@ -37,8 +37,8 @@ flowchart LR
 | Bloco | Responsabilidade | Tecnologia |
 |---|---|---|
 | **Totem (hardware)** | Emitir senhas pelos botões, confirmar com buzzer/display, guardar pacotes offline e enviá-los pela rede | ESP32 + MicroPython |
-| **API Backend** | Receber e validar os pacotes; ordenar o atendimento (fila de prioridade); gravar no banco | Servidor de teste hoje (`backend/servidor_teste.py`); API definitiva em Flask/FastAPI |
-| **BD Relacional** | Registrar senhas, tempos de espera e de atendimento | SQLite ou PostgreSQL (próxima entrega) |
+| **API Backend** | Receber e validar os pacotes; detectar reenvios, reboots e perdas; gravar cada pacote numa transação atômica | FastAPI + Pydantic (`backend/api/`); tabela hash própria para os índices em memória |
+| **BD Relacional** | Livro-razão de transações, senhas, saldos da fila, telemetria e auditoria | SQLite (`database/schema.sql`), portável para PostgreSQL |
 | **Dashboard** | Exibir a fila e as métricas de atendimento | Streamlit (próxima entrega) |
 
 ## Mapeamento dos pinos

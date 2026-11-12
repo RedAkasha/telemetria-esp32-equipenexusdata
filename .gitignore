@@ -22,3 +22,10 @@ Projeto AV2*.pdf
 
 # Rascunhos e testes locais
 _rascunhos/
+
+# Banco SQLite da API (gerado ao rodar)
+backend/nexus.db
+backend/nexus.db-*
+*.db-wal
+*.db-shm
+.pytest_cache/
