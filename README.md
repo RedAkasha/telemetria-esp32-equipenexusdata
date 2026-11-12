@@ -16,12 +16,12 @@ Projeto da disciplina **Algoritmo e Estrutura de Dados (BD015)** — CESAR Schoo
 ```mermaid
 flowchart LR
     HW["🔌 Totem ESP32<br/>botões · buzzer · OLED<br/>(MicroPython)"]
-    API["⚙️ API Backend<br/>REST · HTTP/JSON"]
-    DB[("🗄️ BD Relacional")]
+    API["⚙️ API Backend (FastAPI)<br/>validação · tabelas hash O(1)"]
+    DB[("🗄️ SQLite<br/>transações · saldos · auditoria")]
     DASH["📊 Dashboard"]
 
     HW -- "Wi-Fi · urequests.post() (JSON)" --> API
-    API -- "INSERT" --> DB
+    API -- "transação atômica" --> DB
     DB -- "SELECT" --> DASH
 ```
 
@@ -52,6 +52,18 @@ Em [`firmware/estruturas.py`](firmware/estruturas.py). Todas usam lista de **tam
 | **Fila de contingência offline** (`FilaContingencia`, FIFO, 50) | Todo pacote JSON entra na fila e só sai depois que o servidor responde 2xx. Sem Wi-Fi ou com o servidor fora do ar, os pacotes ficam guardados e são reenviados **na ordem original** quando a conexão volta | `enfileirar` · `espiar` · `desenfileirar` |
 | **Pilha LIFO de histórico** (`PilhaHistorico`, 10) | Últimas senhas emitidas; o topo é a senha exibida no display. Segurar um botão 2 s faz `pop()` e **cancela a última senha** | `push` · `pop` · `topo` · `ultimos(k)` |
 | **Janela deslizante** (`JanelaDeslizante`, 5) | Média móvel do intervalo entre senhas: o ritmo de chegada de clientes, enviado no pacote de status | `adicionar` · `media` (soma corrente) |
+
+## ⚙️ Backend e banco de dados
+
+A API em [`backend/api/`](backend/api/) recebe o `POST /leituras` do ESP32, valida cada pacote com Pydantic (um modelo por `tipo`) e grava tudo numa **única transação SQL** (`BEGIN IMMEDIATE … COMMIT`): livro-razão de transações, senha, saldo da fila e log de auditoria. Uma falha no meio faz `ROLLBACK` e nada do pacote fica gravado; o ESP32 recebe erro e reenvia.
+
+| Estrutura no backend | Papel | Custo |
+|---|---|---|
+| `TabelaHash` própria ([`tabela_hash.py`](backend/api/tabela_hash.py), encadeamento separado + FNV-1a) | Índices em memória: chave de idempotência, dispositivos, senhas aguardando, saldos | busca/inserção/remoção O(1) médio |
+| `saldos` (SQL) | `emitidas`, `canceladas`, `em_espera` por totem e categoria, incrementados no próprio `UPDATE` | O(1) por chave primária |
+| `logs_auditoria` (SQL) | Toda requisição aceita, duplicada ou rejeitada e toda anomalia (reboot, lacuna de `seq`, divergência de totais) | somente-inserção |
+
+Como o firmware reenvia o pacote quando não recebe 2xx, a API é **idempotente**: o reenvio é achado na tabela hash e respondido com `200` sem duplicar nada. Modelo do banco em [`database/`](database/README.md); rotas e testes em [`backend/README.md`](backend/README.md).
 
 ## 📦 Pacotes JSON enviados
 
@@ -90,8 +102,12 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 │   ├── config_exemplo.py     Modelo de configuração (copiar para config.py)
 │   └── wokwi/diagram.json    Circuito para o simulador Wokwi
 ├── backend/
-│   └── servidor_teste.py     Servidor HTTP de teste que recebe os pacotes
-├── database/                 Scripts SQL (próximas entregas)
+│   ├── api/                  API FastAPI: validação, regras de negócio, tabela hash
+│   ├── tests/                Testes automatizados (pytest)
+│   ├── requirements.txt      Dependências da API
+│   └── servidor_teste.py     Servidor HTTP de teste das entregas anteriores
+├── database/
+│   └── schema.sql            Modelo relacional: transações, saldos, auditoria
 ├── dashboard/                Visualização (próximas entregas)
 └── docs/
     ├── passo_a_passo.md      Guia completo: da bancada à entrega
@@ -111,18 +127,20 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
    esptool --chip esp32 --port COM5 erase_flash
    esptool --chip esp32 --port COM5 --baud 115200 write_flash -z --flash_mode dio 0x1000 ESP32_GENERIC-20260824-v1.29.0.bin
    ```
-3. **Servidor de teste**, no notebook, que precisa estar na mesma rede do ESP32:
+3. **API backend**, no notebook, que precisa estar na mesma rede do ESP32:
    ```bash
-   python backend/servidor_teste.py
+   cd backend
+   pip install -r requirements.txt
+   python -m api
    ```
-   Ele mostra o `API_URL` a usar. Confira com `ipconfig` que é o IPv4 do adaptador **Wi-Fi** e libere o Python no firewall.
+   Ela cria o banco `backend/nexus.db` a partir de `database/schema.sql` e mostra o `API_URL` a usar. Saldos e auditoria em `http://localhost:5000/docs`. (O servidor de teste antigo continua disponível: `python backend/servidor_teste.py`.) Confira com `ipconfig` que é o IPv4 do adaptador **Wi-Fi** e libere o Python no firewall.
 4. **Configuração:** copie `firmware/config_exemplo.py` para `firmware/config.py` e preencha `WIFI_SSID`, `WIFI_SENHA` (rede **2,4 GHz**) e `API_URL`.
    > ⚠️ O `config.py` está no `.gitignore`: **nunca** faça commit da senha do Wi-Fi.
 5. **Enviar para a placa** `boot.py`, `config.py`, `estruturas.py`, `ssd1306.py` e `main.py`:
    - **Thonny:** *Exibir → Arquivos* → selecione os arquivos → botão direito → *Enviar para /*.
    - **VS Code + MicroPico:** abra a pasta `firmware/` → *MicroPico: Connect* → *MicroPico: Upload project to board*.
 6. **Diagnóstico (opcional):** abra `firmware/teste_hardware.py` no Thonny e clique em ▶.
-7. **Rodar:** aperte **EN** na placa. Toque no botão azul ou branco para emitir uma senha; segure 2 s para cancelar a última. Cada pacote aparece no servidor como `[201]`.
+7. **Rodar:** aperte **EN** na placa. Toque no botão azul ou branco para emitir uma senha; segure 2 s para cancelar a última. Cada pacote é gravado no banco; confira em `http://localhost:5000/saldos` e `/auditoria`.
 8. **Testar a fila offline:** pare o servidor (Ctrl+C) e emita algumas senhas. O display mostra `F:1`, `F:2`… Religue o servidor: os pacotes são reenviados em ordem e a fila volta a `F:0`.
 
 **Sem placa?** No [Wokwi](https://wokwi.com/esp32), crie um projeto ESP32 + MicroPython, adicione `boot.py`, `estruturas.py`, `ssd1306.py` e `main.py` e use as peças e ligações de [`firmware/wokwi/diagram.json`](firmware/wokwi/diagram.json). Mantenha a linha da placa do seu projeto, que define a versão do MicroPython. Sem `config.py`, o firmware usa a rede `Wokwi-GUEST` e envia para `http://httpbin.org/post`. Projeto da equipe: https://wokwi.com/projects/479258817358709761
@@ -159,6 +177,8 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 - [x] Estruturas de dados em memória no ESP32: fila de contingência, pilha LIFO e janela deslizante
 - [x] Envio de pacotes JSON via `urequests.post()` para servidor de teste
 - [x] Foto do circuito montado na bancada
-- [ ] API backend com fila de prioridade e gravação no banco
-- [ ] Modelagem e criação do banco relacional
+- [x] API backend (FastAPI) com validação dos pacotes e gravação atômica no banco
+- [x] Modelagem do banco relacional (`database/schema.sql`): transações, saldos e logs de auditoria
+- [x] Buscas O(1) em tabelas hash no backend (idempotência, dispositivos, senhas, saldos)
+- [ ] Fila de prioridade para a chamada das senhas
 - [ ] Dashboard Streamlit
