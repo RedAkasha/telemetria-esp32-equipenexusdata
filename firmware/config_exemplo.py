@@ -27,3 +27,11 @@ PINO_BOTAO_PRIORITARIO = 33    # botão branco
 PINO_BUZZER = 25
 OLED_SDA = 5                   # display embutido na placa
 OLED_SCL = 4
+
+# Comandos do dashboard (travar/liberar, alarme, resetar contador).
+# Ligados quando o API_URL termina em /leituras (a API do backend/api).
+# COMANDOS = False             # descomente para não consultar comandos
+
+# Trava: GPIO de um relé ou LED (1 = liberado, 0 = travado). Sem ele, a trava
+# é só lógica: os botões param de emitir senhas e o display mostra TRAVADO.
+# PINO_TRAVA = 26

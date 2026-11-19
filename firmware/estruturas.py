@@ -152,6 +152,13 @@ class PilhaHistorico:
         self._tamanho -= 1
         return item
 
+    def limpar(self):
+        """Esvazia a pilha em O(n) só para soltar as referências (n <= capacidade)."""
+        for i in range(self._capacidade):
+            self._dados[i] = None
+        self._fundo = 0
+        self._tamanho = 0
+
     def ultimos(self, k):
         """Lista com até k elementos, do topo (mais recente) para baixo."""
         k = min(k, self._tamanho)
@@ -196,6 +203,14 @@ class JanelaDeslizante:
         self._valores[self._pos] = valor
         self._soma += valor
         self._pos = (self._pos + 1) % self._tamanho
+
+    def limpar(self):
+        """Zera a janela (usado quando o dashboard reseta o contador)."""
+        for i in range(self._tamanho):
+            self._valores[i] = 0
+        self._pos = 0
+        self._qtd = 0
+        self._soma = 0
 
     def media(self):
         """Média dos valores presentes na janela (0 se vazia)."""
