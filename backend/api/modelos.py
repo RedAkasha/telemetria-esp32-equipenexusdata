@@ -9,7 +9,7 @@
 from datetime import datetime
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, TypeAdapter, model_validator
 
 PADRAO_SENHA = r"^[NP][0-9]{3}$"
 PADRAO_DISPOSITIVO = r"^[A-Za-z0-9_.-]{1,64}$"
@@ -31,6 +31,9 @@ class Cabecalho(BaseModel):
 class PacoteInicio(Cabecalho):
     tipo: Literal["inicio"]
     ip: Optional[str] = Field(default=None, max_length=45)
+    # "boot" (ligou) ou "resetar_contador" (comando do dashboard zerou a sessão)
+    motivo: Optional[Annotated[str, Field(max_length=40)]] = None
+    comando_id: Optional[Annotated[StrictInt, Field(ge=1)]] = None
 
 
 class PacoteSenhaEmitida(Cabecalho):
@@ -64,6 +67,9 @@ class PacoteStatus(Cabecalho):
     descartados: Optional[Contador] = None
     rssi_dbm: Optional[StrictInt] = Field(default=None, ge=-127, le=0)
     mem_livre: Optional[Contador] = None
+    # estado dos atuadores controlados por comando
+    travado: Optional[StrictBool] = None
+    alarme: Optional[StrictBool] = None
 
 
 Pacote = Annotated[
@@ -72,3 +78,45 @@ Pacote = Annotated[
 ]
 
 validador_pacote = TypeAdapter(Pacote)
+
+
+# ==============================================================================
+# Comandos: dashboard -> API -> ESP32 (sentido inverso ao da telemetria)
+# ==============================================================================
+TipoComando = Literal["liberar_trava", "travar", "acionar_alarme",
+                      "silenciar_alarme", "resetar_contador"]
+
+
+class ComandoNovo(BaseModel):
+    """Corpo do POST /comandos (enviado pelo dashboard)."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    dispositivo: Annotated[str, Field(pattern=PADRAO_DISPOSITIVO)]
+    tipo: TipoComando
+    # só para acionar_alarme: por quanto tempo a sirene toca
+    duracao_s: Optional[Annotated[StrictInt, Field(ge=1, le=60)]] = None
+    # prazo para o totem buscar o comando; depois disso ele expira sem executar
+    validade_s: Annotated[StrictInt, Field(ge=5, le=3600)] = 60
+    origem: Annotated[str, Field(min_length=1, max_length=40)] = "dashboard"
+
+    @model_validator(mode="after")
+    def _parametros_coerentes(self):
+        if self.duracao_s is not None and self.tipo != "acionar_alarme":
+            raise ValueError("duracao_s só vale para acionar_alarme")
+        return self
+
+    def parametros(self) -> dict:
+        if self.tipo == "acionar_alarme":
+            return {"duracao_s": self.duracao_s or 10}
+        return {}
+
+
+class ConfirmacaoComando(BaseModel):
+    """Corpo do POST /comandos/{id}/confirmacao (enviado pelo ESP32)."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    dispositivo: Annotated[str, Field(pattern=PADRAO_DISPOSITIVO)]
+    resultado: Literal["executado", "falhou"]
+    detalhe: Optional[Annotated[str, Field(max_length=200)]] = None
+    # retrato do totem logo após executar (travado, alarme, contadores...)
+    estado: Optional[dict] = None

@@ -17,9 +17,10 @@
 #   400  corpo não é JSON          413  corpo grande demais
 #   422  JSON fora do formato      500  falha ao gravar (ROLLBACK feito)
 # ==============================================================================
+import asyncio
 import json
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -28,10 +29,11 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from .modelos import validador_pacote
+from .modelos import ComandoNovo, ConfirmacaoComando, validador_pacote
 from .servico import ServicoTelemetria
 
 TAMANHO_MAXIMO = 8 * 1024          # bytes; o maior pacote do totem (status) tem ~400
+INTERVALO_VARREDURA_S = 2          # expira comandos mesmo com o totem desligado
 BANCO_PADRAO = Path(__file__).resolve().parents[1] / "nexus.db"
 
 
@@ -47,9 +49,23 @@ def criar_app(caminho_banco=None) -> FastAPI:
 
     @asynccontextmanager
     async def ciclo_de_vida(app: FastAPI):
-        app.state.servico = ServicoTelemetria(caminho)
+        svc = app.state.servico = ServicoTelemetria(caminho)
+
+        async def vigia_comandos():
+            """Expira comandos não buscados mesmo que nenhum totem consulte a API."""
+            while True:
+                await asyncio.sleep(INTERVALO_VARREDURA_S)
+                try:
+                    await run_in_threadpool(svc.varrer_comandos)
+                except Exception as erro:                    # nunca derruba a API
+                    print("[api] falha na varredura de comandos:", repr(erro))
+
+        tarefa = asyncio.create_task(vigia_comandos())
         yield
-        app.state.servico.fechar()
+        tarefa.cancel()
+        with suppress(asyncio.CancelledError):
+            await tarefa
+        svc.fechar()
 
     app = FastAPI(
         title="NEXUS Data — API do Totem ByteBank Queue",
@@ -147,6 +163,41 @@ def criar_app(caminho_banco=None) -> FastAPI:
         evento: Optional[str] = None,
     ):
         return servico(request).auditoria(limite, nivel, evento)
+
+    # ----------------------------------------------------------------- comandos
+    @app.post("/comandos", tags=["Comandos"], status_code=201,
+              summary="Cria um comando para o totem (usado pelo dashboard)")
+    def criar_comando(cmd: ComandoNovo, request: Request):
+        status, corpo = servico(request).criar_comando(cmd, ip_cliente(request))
+        return JSONResponse(corpo, status)
+
+    @app.get("/comandos", tags=["Comandos"], summary="Comandos (mais recentes primeiro)")
+    def listar_comandos(
+        request: Request,
+        limite: int = Query(50, ge=1, le=500),
+        dispositivo: Optional[str] = None,
+        situacao: Optional[Literal["pendente", "entregue", "executado", "falhou",
+                                   "expirado", "sem_resposta"]] = None,
+    ):
+        return servico(request).comandos(limite, dispositivo, situacao)
+
+    @app.get("/comandos/{cid}", tags=["Comandos"])
+    def consultar_comando(cid: int, request: Request):
+        cmd = servico(request).comando(cid)
+        if cmd is None:
+            raise HTTPException(404, "comando inexistente")
+        return cmd
+
+    @app.get("/dispositivos/{dispositivo}/comandos/proximo", tags=["ESP32"],
+             summary="Próximo comando do totem (consultado pelo ESP32 a cada ~2 s)")
+    def proximo_comando(dispositivo: str, request: Request):
+        return {"comando": servico(request).proximo_comando(dispositivo, ip_cliente(request))}
+
+    @app.post("/comandos/{cid}/confirmacao", tags=["ESP32"],
+              summary="Resultado da execução do comando (enviado pelo ESP32)")
+    def confirmar_comando(cid: int, conf: ConfirmacaoComando, request: Request):
+        status, corpo = servico(request).confirmar_comando(cid, conf, ip_cliente(request))
+        return JSONResponse(corpo, status)
 
     @app.get("/indices", tags=["Consulta"],
              summary="Estatísticas das tabelas hash em memória")

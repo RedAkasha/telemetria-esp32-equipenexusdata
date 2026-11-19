@@ -21,11 +21,21 @@
 # pacote por vez nesta seção (o SQLite também só aceita um escritor por vez), o
 # que mantém banco e índices consistentes. Leitores externos (dashboard) usam o
 # modo WAL e não bloqueiam a gravação.
+#
+# Comandos (dashboard -> totem): o ESP32 só faz requisições, não recebe
+# conexões. O dashboard cria o comando (POST /comandos) e o totem o busca a
+# cada ~2 s (GET /dispositivos/{id}/comandos/proximo). Cada totem tem a sua
+# FILA FIFO de comandos abertos dentro de uma TabelaHash:
+#     idx_comandos: identificador -> deque([comando, comando, ...])
+# A consulta do totem, feita o tempo todo, custa O(1) e não toca no banco
+# quando não há nada para ele. Só a cabeça da fila é entregue, e o próximo
+# comando só sai depois que o anterior foi confirmado (ordem garantida).
 # ==============================================================================
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .modelos import PacoteSenhaCancelada, PacoteSenhaEmitida, PacoteStatus
@@ -36,6 +46,9 @@ SCHEMA_PADRAO = RAIZ / "database" / "schema.sql"
 
 CATEGORIAS = ("convencional", "prioritaria")
 LIMITE_PAYLOAD_AUDITORIA = 2000   # caracteres do corpo rejeitado guardados no log
+
+PRAZO_CONFIRMACAO_S = 10   # sem confirmação nesse prazo, o comando é entregue de novo
+MAX_ENTREGAS = 3           # depois disso: "sem_resposta"
 
 
 def agora_utc() -> str:
@@ -83,6 +96,9 @@ class ServicoTelemetria:
         self.idx_saldos = TabelaHash()
         # dispositivo_id -> última anomalia de status registrada (evita log repetido a cada 15 s)
         self.idx_ultimo_alerta = TabelaHash()
+        # identificador -> deque FIFO de comandos abertos (pendente/entregue)
+        self.idx_comandos = TabelaHash()
+        self._relogio = lambda: datetime.now(timezone.utc)   # trocado nos testes
         self._carregar_indices()
 
     def fechar(self):
@@ -111,6 +127,9 @@ class ServicoTelemetria:
             self.idx_senhas_ativas[(s["dispositivo_id"], s["codigo"])] = s["id"]
         for s in c.execute("SELECT * FROM saldos"):
             self.idx_saldos[(s["dispositivo_id"], s["categoria"])] = self._saldo_de(s)
+        for cmd in c.execute("SELECT * FROM vw_comandos WHERE situacao IN "
+                             "('pendente', 'entregue') ORDER BY id"):
+            self._fila_comandos(cmd["dispositivo"]).append(self._item_comando(cmd))
 
     @staticmethod
     def _saldo_de(linha):
@@ -212,9 +231,14 @@ class ServicoTelemetria:
             if reiniciou:
                 novo["boot"] += 1
                 novo["emitidas_boot"] = dict.fromkeys(CATEGORIAS, 0)
-                motivo = "pacote inicio" if p.tipo == "inicio" else \
-                    "seq voltou de {} para {} sem pacote inicio".format(atual["ultimo_seq"], p.seq)
-                avisos.append(("novo_boot", "boot {} ({})".format(novo["boot"], motivo)))
+                if p.tipo == "inicio" and getattr(p, "motivo", None) == "resetar_contador":
+                    avisos.append(("contador_resetado", "sessão {} (comando {})".format(
+                        novo["boot"], getattr(p, "comando_id", None) or "?")))
+                else:
+                    motivo = "pacote inicio" if p.tipo == "inicio" else \
+                        "seq voltou de {} para {} sem pacote inicio".format(
+                            atual["ultimo_seq"], p.seq)
+                    avisos.append(("novo_boot", "boot {} ({})".format(novo["boot"], motivo)))
                 anterior = 0
             else:
                 anterior = atual["ultimo_seq"]
@@ -443,6 +467,7 @@ class ServicoTelemetria:
                 "transacoes": c.execute("SELECT COUNT(*) FROM transacoes").fetchone()[0],
                 "dispositivos": len(self.idx_dispositivos),
                 "senhas_aguardando": len(self.idx_senhas_ativas),
+                "comandos_abertos": sum(len(f) for _, f in self.idx_comandos.itens()),
                 "logs_auditoria": c.execute("SELECT COUNT(*) FROM logs_auditoria").fetchone()[0],
             }
 
@@ -453,8 +478,225 @@ class ServicoTelemetria:
                 "idempotencia": self.idx_idempotencia,
                 "senhas_ativas": self.idx_senhas_ativas,
                 "saldos": self.idx_saldos,
+                "comandos": self.idx_comandos,
             }
             return {nome: {"itens": len(t), "capacidade": t.capacidade,
                            "fator_carga": round(t.fator_carga, 3), "colisoes": t.colisoes,
                            "maior_balde": t.maior_balde(), "rehashes": t.rehashes}
                     for nome, t in tabelas.items()}
+
+    # ==========================================================================
+    # Comandos: dashboard -> API -> ESP32
+    # ==========================================================================
+    def _agora(self):
+        return self._relogio()
+
+    @staticmethod
+    def _iso(momento):
+        return momento.isoformat(timespec="milliseconds")
+
+    def _fila_comandos(self, identificador):
+        fila = self.idx_comandos.buscar(identificador)                     # O(1)
+        if fila is None:
+            fila = deque()
+            self.idx_comandos.inserir(identificador, fila)
+        return fila
+
+    @staticmethod
+    def _item_comando(linha):
+        """Representação em memória de um comando aberto."""
+        entregue = linha["entregue_em"]
+        return {"id": linha["id"], "tipo": linha["tipo"],
+                "parametros": json.loads(linha["parametros"]),
+                "situacao": linha["situacao"], "tentativas": linha["tentativas"],
+                "expira_em": datetime.fromisoformat(linha["expira_em"]),
+                "entregue_em": datetime.fromisoformat(entregue) if entregue else None}
+
+    def _comando_publico(self, cid):
+        linha = self._conn.execute("SELECT * FROM vw_comandos WHERE id = ?", (cid,)).fetchone()
+        if linha is None:
+            return None
+        d = dict(linha)
+        d["parametros"] = json.loads(d["parametros"])
+        d["estado_totem"] = json.loads(d["estado_totem"]) if d["estado_totem"] else None
+        return d
+
+    def _em_transacao(self, operacao):
+        """Executa operacao() entre BEGIN IMMEDIATE e COMMIT (ROLLBACK se falhar)."""
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            resultado = operacao()
+            c.execute("COMMIT")
+            return resultado
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
+
+    def criar_comando(self, cmd, ip=None):
+        """Grava um comando novo. Devolve (status_http, corpo)."""
+        with self._lock:
+            disp = self.idx_dispositivos.buscar(cmd.dispositivo)            # O(1)
+            if disp is None:
+                return 404, {"erro": "totem {} nunca enviou dados".format(cmd.dispositivo)}
+            agora = self._agora()
+            self._varrer(agora)
+            expira = agora + timedelta(seconds=cmd.validade_s)
+            parametros = cmd.parametros()
+
+            def gravar():
+                cid = self._conn.execute(
+                    "INSERT INTO comandos (dispositivo_id, tipo, parametros, origem, "
+                    "criado_em, expira_em) VALUES (?, ?, ?, ?, ?, ?)",
+                    (disp["id"], cmd.tipo, json.dumps(parametros), cmd.origem,
+                     self._iso(agora), self._iso(expira))).lastrowid
+                self._auditar(self._iso(agora), "info", "comando_criado", cmd.dispositivo,
+                              None, None, ip, "#{} {} {} (origem: {})".format(
+                                  cid, cmd.tipo, json.dumps(parametros) if parametros else "",
+                                  cmd.origem))
+                return cid
+            cid = self._em_transacao(gravar)
+            # COMMIT feito: o comando entra no fim da fila FIFO do totem
+            self._fila_comandos(cmd.dispositivo).append({
+                "id": cid, "tipo": cmd.tipo, "parametros": parametros,
+                "situacao": "pendente", "tentativas": 0, "expira_em": expira,
+                "entregue_em": None})
+            return 201, self._comando_publico(cid)
+
+    def _varrer(self, agora, identificador=None):
+        """Expira comandos não buscados e encerra os que nunca foram confirmados.
+
+        Roda em toda consulta do totem e, periodicamente, numa tarefa da API
+        (o totem pode estar desligado e não consultar nada).
+        """
+        filas = [(identificador, self.idx_comandos.buscar(identificador))] \
+            if identificador else list(self.idx_comandos.itens())
+        mudancas = []                                  # (identificador, item, nova situação)
+        prazo = timedelta(seconds=PRAZO_CONFIRMACAO_S)
+        for ident, fila in filas:
+            if not fila:
+                continue
+            for item in fila:
+                if item["situacao"] == "pendente" and agora >= item["expira_em"]:
+                    mudancas.append((ident, item, "expirado"))
+            cabeca = fila[0]
+            if cabeca["situacao"] == "entregue" and agora - cabeca["entregue_em"] >= prazo \
+                    and cabeca["tentativas"] >= MAX_ENTREGAS:
+                mudancas.append((ident, cabeca, "sem_resposta"))
+        if not mudancas:
+            return 0
+
+        def gravar():
+            for ident, item, nova in mudancas:
+                cur = self._conn.execute(
+                    "UPDATE comandos SET situacao = ? WHERE id = ? AND situacao = ?",
+                    (nova, item["id"], item["situacao"]))
+                if cur.rowcount != 1:
+                    raise ErroConsistencia("comando {} mudou fora da API".format(item["id"]))
+                detalhe = "#{} {} não foi buscado dentro da validade".format(
+                    item["id"], item["tipo"]) if nova == "expirado" else \
+                    "#{} {} entregue {} vezes sem confirmação".format(
+                        item["id"], item["tipo"], item["tentativas"])
+                self._auditar(self._iso(agora), "aviso", "comando_" + nova, ident,
+                              None, None, None, detalhe)
+        self._em_transacao(gravar)
+        for ident, item, _ in mudancas:
+            self.idx_comandos.buscar(ident).remove(item)
+        return len(mudancas)
+
+    def varrer_comandos(self):
+        with self._lock:
+            return self._varrer(self._agora())
+
+    def proximo_comando(self, identificador, ip=None):
+        """Entrega ao totem a cabeça da sua fila de comandos (ou None).
+
+        Busca O(1) na tabela hash; sem comando aberto, nem toca no banco.
+        """
+        with self._lock:
+            fila = self.idx_comandos.buscar(identificador)                  # O(1)
+            if not fila:
+                return None
+            agora = self._agora()
+            self._varrer(agora, identificador)
+            if not fila:
+                return None
+            item = fila[0]
+            if item["situacao"] == "entregue" and \
+                    agora - item["entregue_em"] < timedelta(seconds=PRAZO_CONFIRMACAO_S):
+                return None          # aguardando a confirmação do comando anterior
+
+            def gravar():
+                tentativas = self._conn.execute(
+                    "UPDATE comandos SET situacao = 'entregue', tentativas = tentativas + 1, "
+                    "entregue_em = ? WHERE id = ? AND situacao IN ('pendente', 'entregue') "
+                    "RETURNING tentativas", (self._iso(agora), item["id"])).fetchone()
+                if tentativas is None:
+                    raise ErroConsistencia("comando {} mudou fora da API".format(item["id"]))
+                self._auditar(self._iso(agora), "info", "comando_entregue", identificador,
+                              None, None, ip, "#{} {} (entrega {})".format(
+                                  item["id"], item["tipo"], tentativas[0]))
+                return tentativas[0]
+            tentativas = self._em_transacao(gravar)
+            item.update(situacao="entregue", tentativas=tentativas, entregue_em=agora)
+            return {"id": item["id"], "tipo": item["tipo"],
+                    "parametros": item["parametros"], "tentativa": tentativas}
+
+    def confirmar_comando(self, cid, conf, ip=None):
+        """O totem informa o resultado. Idempotente. Devolve (status_http, corpo)."""
+        with self._lock:
+            atual = self._conn.execute(
+                "SELECT situacao, dispositivo FROM vw_comandos WHERE id = ?", (cid,)).fetchone()
+            if atual is None:
+                return 404, {"erro": "comando inexistente"}
+            if atual["dispositivo"] != conf.dispositivo:
+                self._auditar_isolado("erro", "confirmacao_rejeitada", conf.dispositivo, None,
+                                      ip, "#{} pertence a {}".format(cid, atual["dispositivo"]))
+                return 409, {"erro": "comando pertence a outro totem"}
+            if atual["situacao"] in ("executado", "falhou"):
+                return 200, {"status": "ja_confirmado", "comando": self._comando_publico(cid)}
+            if atual["situacao"] in ("pendente", "expirado"):
+                return 409, {"erro": "comando não foi entregue (situação: {})".format(
+                    atual["situacao"])}
+            agora = self._iso(self._agora())
+
+            def gravar():
+                self._conn.execute(
+                    "UPDATE comandos SET situacao = ?, concluido_em = ?, resultado = ?, "
+                    "estado_totem = ? WHERE id = ?",
+                    (conf.resultado, agora, conf.detalhe,
+                     json.dumps(conf.estado, ensure_ascii=False) if conf.estado else None, cid))
+                nivel = "info" if conf.resultado == "executado" else "aviso"
+                tardia = " (confirmação tardia)" if atual["situacao"] == "sem_resposta" else ""
+                self._auditar(agora, nivel, "comando_" + conf.resultado, conf.dispositivo,
+                              None, None, ip, "#{}{}{}".format(
+                                  cid, " " + conf.detalhe if conf.detalhe else "", tardia))
+            self._em_transacao(gravar)
+            fila = self.idx_comandos.buscar(conf.dispositivo)
+            if fila:
+                for item in fila:
+                    if item["id"] == cid:
+                        fila.remove(item)
+                        break
+            return 200, {"status": "ok", "comando": self._comando_publico(cid)}
+
+    def comando(self, cid):
+        with self._lock:
+            return self._comando_publico(cid)
+
+    def comandos(self, limite=50, dispositivo=None, situacao=None):
+        sql = "SELECT * FROM vw_comandos WHERE 1 = 1"
+        params = []
+        if dispositivo:
+            sql += " AND dispositivo = ?"
+            params.append(dispositivo)
+        if situacao:
+            sql += " AND situacao = ?"
+            params.append(situacao)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limite)
+        linhas = self._consultar(sql, params)
+        for d in linhas:
+            d["parametros"] = json.loads(d["parametros"])
+            d["estado_totem"] = json.loads(d["estado_totem"]) if d["estado_totem"] else None
+        return linhas

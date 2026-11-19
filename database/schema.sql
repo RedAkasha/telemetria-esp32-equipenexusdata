@@ -156,6 +156,47 @@ CREATE INDEX IF NOT EXISTS idx_auditoria_ocorrido_em ON logs_auditoria (ocorrido
 CREATE INDEX IF NOT EXISTS idx_auditoria_evento      ON logs_auditoria (evento, nivel);
 
 -- -----------------------------------------------------------------------------
+-- Comandos do dashboard para o totem (sentido inverso: servidor -> ESP32).
+-- O ESP32 não recebe conexões; ele CONSULTA o servidor a cada ~2 s
+-- (GET /dispositivos/{id}/comandos/proximo). Ciclo de vida:
+--
+--   pendente --entrega--> entregue --confirmação--> executado | falhou
+--      |                     |
+--      | passou expira_em    | sem confirmação após N entregas
+--      v                     v
+--   expirado              sem_resposta  (uma confirmação tardia ainda é aceita)
+--
+-- Um comando nunca entregue expira: um alarme pedido há 1 hora não deve tocar
+-- quando o totem voltar à rede. Por totem, os comandos saem em ordem FIFO e um
+-- só fica "entregue" por vez (travar -> liberar sempre nessa ordem).
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS comandos (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    dispositivo_id  INTEGER NOT NULL REFERENCES dispositivos(id),
+    tipo            TEXT    NOT NULL CHECK (tipo IN ('liberar_trava', 'travar', 'acionar_alarme',
+                                                     'silenciar_alarme', 'resetar_contador')),
+    parametros      TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(parametros)),
+    situacao        TEXT    NOT NULL DEFAULT 'pendente'
+                    CHECK (situacao IN ('pendente', 'entregue', 'executado', 'falhou',
+                                        'expirado', 'sem_resposta')),
+    origem          TEXT    NOT NULL DEFAULT 'dashboard',
+    criado_em       TEXT    NOT NULL,
+    expira_em       TEXT    NOT NULL,
+    tentativas      INTEGER NOT NULL DEFAULT 0 CHECK (tentativas >= 0),
+    entregue_em     TEXT,
+    concluido_em    TEXT,
+    resultado       TEXT,                         -- detalhe informado pelo ESP32
+    estado_totem    TEXT    CHECK (estado_totem IS NULL OR json_valid(estado_totem)),
+    CHECK (expira_em > criado_em),
+    CHECK ((situacao IN ('executado', 'falhou')) = (concluido_em IS NOT NULL)),
+    CHECK (situacao = 'pendente' OR situacao = 'expirado' OR tentativas >= 1)
+);
+
+-- Índice parcial: só os comandos ainda em andamento (carregados na memória ao iniciar)
+CREATE INDEX IF NOT EXISTS idx_comandos_abertos
+    ON comandos (dispositivo_id, id) WHERE situacao IN ('pendente', 'entregue');
+
+-- -----------------------------------------------------------------------------
 -- Imutabilidade: livro-razão e auditoria são somente-inserção.
 -- -----------------------------------------------------------------------------
 CREATE TRIGGER IF NOT EXISTS trg_transacoes_sem_update
@@ -194,3 +235,23 @@ SELECT d.identificador AS dispositivo,
        s.atualizado_em
 FROM saldos s
 JOIN dispositivos d ON d.id = s.dispositivo_id;
+
+-- -----------------------------------------------------------------------------
+-- Visão para o dashboard: comandos com o nome do totem.
+-- -----------------------------------------------------------------------------
+CREATE VIEW IF NOT EXISTS vw_comandos AS
+SELECT c.id,
+       d.identificador AS dispositivo,
+       c.tipo,
+       c.parametros,
+       c.situacao,
+       c.origem,
+       c.criado_em,
+       c.expira_em,
+       c.tentativas,
+       c.entregue_em,
+       c.concluido_em,
+       c.resultado,
+       c.estado_totem
+FROM comandos c
+JOIN dispositivos d ON d.id = c.dispositivo_id;
