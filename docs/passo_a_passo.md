@@ -208,6 +208,36 @@ Arquivos que precisam estar na placa (todos da pasta `firmware/`):
 
 Esse é o melhor momento para tirar os prints das evidências (Etapa 10).
 
+### 8.2 Dashboard e comandos
+
+Os comandos precisam da **API definitiva** (o `servidor_teste.py` só recebe pacotes).
+
+1. Pare o servidor de teste e suba a API (o `API_URL` do `config.py` continua o mesmo, terminando em `/leituras`):
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   python -m api
+   ```
+2. Em outro terminal, na pasta do repositório:
+   ```bash
+   pip install -r dashboard/requirements.txt
+   streamlit run dashboard/app.py
+   ```
+   O navegador abre em `http://localhost:8501`. Escolha o totem na barra lateral; o painel se atualiza sozinho a cada 2 s.
+3. Reinicie a placa (**EN**). O REPL mostra `Comandos: consulta a cada 2000 ms`. Teste pelo painel:
+
+| Botão do painel | O que acontece na placa | REPL |
+|---|---|---|
+| 🔒 **Travar** | display "TRAVADO"; apertar os botões só dá um bipe grave | `[cmd] #1 travar recebido` / `executado` |
+| 🔓 **Liberar trava** | volta a emitir senhas | `[cmd] #2 liberar_trava …` |
+| 🚨 **Acionar alarme** (10 s) | sirene de dois tons; os botões continuam funcionando | `[alarme] Encerrado.` ao fim |
+| 🔄 **Resetar contador** (marque "Confirmo") | a próxima senha volta a ser N001 | `[cmd] #… resetar_contador …` |
+
+4. Na tabela **Comandos enviados**, cada um passa de ⏳ pendente → 📡 entregue → ✅ executado em até ~2 s.
+5. **Comando com o totem desligado:** desligue a placa, mande **Acionar alarme** com validade de 15 s e espere 20 s: o comando vira ⌛ expirado. Ligue a placa: o alarme **não** toca.
+
+Sem placa, rode o firmware no computador para demonstrar o mesmo roteiro: `python -m simulador --auto 4` (teclas `n`, `p`, `c` + Enter).
+
 ---
 
 ## Etapa 9 — Problemas comuns
@@ -221,6 +251,8 @@ Esse é o melhor momento para tirar os prints das evidências (Etapa 10).
 | `could not open port COM5` / `Access is denied` | outro programa usando a porta | feche Thonny, VS Code/MicroPico e abas *Serial Monitor* — deixe só um |
 | Botão dispara sozinho | pino 34/35 ou sem GND | Etapa 1.2 |
 | Display apagado | driver não enviado | envie `ssd1306.py`; rode o diagnóstico |
+| `MemoryError` logo ao iniciar o `main.py` | pouca RAM para compilar o arquivo na placa | reinicie (EN) e tente de novo; se persistir, renomeie `main.py` para `totem.py`, compile no notebook com `pip install mpy-cross` e `python -m mpy_cross totem.py`, envie o `totem.mpy` e crie um `main.py` só com `import totem` |
+| Painel mostra o comando "⏳ pendente" e nada acontece | o `API_URL` não termina em `/leituras` (ex.: httpbin) ou o totem está offline | confira no REPL a linha `Comandos: consulta a cada 2000 ms`; se aparecer `desligados`, corrija o `API_URL` |
 | O IP do notebook mudou outro dia | DHCP | o servidor mostra o IP novo ao iniciar; atualize o `API_URL` e reenvie o `config.py` |
 
 ---
@@ -282,5 +314,7 @@ O histórico de commits vale 25% da nota: faça **vários commits pequenos**, um
 - [ ] README mostra integrantes, arquitetura, esquema de pinos, instruções e **as 4 imagens**
 - [ ] `firmware/` tem `boot.py`, `main.py`, `estruturas.py`, `ssd1306.py`, `config_exemplo.py` (e **não** tem `config.py` no GitHub)
 - [ ] `backend/servidor_teste.py` presente
+- [ ] Dashboard (`dashboard/app.py`) mostrando o totem online, e os comandos funcionando na placa (Etapa 8.2)
+- [ ] `python -m pytest backend/tests e2e` passando (e o check verde na aba **Actions** do GitHub)
 - [ ] `git push` feito e o GitHub mostra os commits
 - [ ] Link `https://github.com/RedAkasha/telemetria-esp32-equipenexusdata` enviado na tarefa do **Google Classroom antes do prazo** (atraso = −50% na nota do projeto)
