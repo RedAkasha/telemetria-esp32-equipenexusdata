@@ -15,6 +15,7 @@ erDiagram
     transacoes ||--o| senhas : "cancelamento"
     transacoes ||--o| telemetria_status : "pacote status"
     transacoes ||--o{ logs_auditoria : "registrada em"
+    dispositivos ||--o{ comandos : "recebe"
 ```
 
 | Tabela | Conteúdo | Regras no próprio banco |
@@ -25,7 +26,9 @@ erDiagram
 | `saldos` | Saldo da fila por totem e categoria: `emitidas`, `canceladas`, `em_espera`, `versao` | `em_espera = emitidas − canceladas`, nada negativo, `canceladas ≤ emitidas` |
 | `telemetria_status` | Métricas de cada pacote `status` em colunas (totais, intervalo médio, fila, RSSI, memória) | 1:1 com a transação |
 | `logs_auditoria` | Toda requisição (aceita, duplicada, rejeitada, falha) e toda anomalia detectada | **Somente-inserção** (triggers) |
+| `comandos` | Comandos do dashboard para o totem: tipo, parâmetros, situação, validade, entregas, resultado e o retrato do totem após executar | Tipo e situação de uma lista fechada; `executado`/`falhou` ⇔ tem `concluido_em`; entregue ⇒ `tentativas ≥ 1`; `expira_em > criado_em`; JSON válido |
 | `vw_saldos` (view) | Saldos com o nome do totem, para o dashboard | — |
+| `vw_comandos` (view) | Comandos com o nome do totem, para o dashboard | — |
 
 PostgreSQL: o modelo é o mesmo; as trocas de sintaxe estão no cabeçalho do `schema.sql`.
 
@@ -38,6 +41,11 @@ SELECT * FROM vw_saldos;
 -- senhas emitidas por hora
 SELECT substr(recebido_em, 1, 13) AS hora, categoria, COUNT(*)
 FROM transacoes WHERE tipo = 'senha_emitida' GROUP BY 1, 2;
+
+-- comandos e quanto o totem levou para executar
+SELECT id, dispositivo, tipo, situacao,
+       round((julianday(concluido_em) - julianday(criado_em)) * 86400, 1) AS segundos
+FROM vw_comandos ORDER BY id DESC;
 
 -- anomalias registradas
 SELECT ocorrido_em, evento, dispositivo, detalhe

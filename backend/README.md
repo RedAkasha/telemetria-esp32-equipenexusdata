@@ -36,6 +36,11 @@ Ela mostra o `API_URL` para o `config.py` do ESP32 (mesma rota do servidor de te
 | `GET` | `/transacoes?limite=&dispositivo=&tipo=` | Livro-razão, mais recentes primeiro |
 | `GET` | `/auditoria?limite=&nivel=&evento=` | Logs de auditoria |
 | `GET` | `/indices` | Itens, capacidade, fator de carga, colisões e maior balde de cada tabela hash |
+| `POST` | `/comandos` | Cria um comando (dashboard): `{dispositivo, tipo, duracao_s?, validade_s?}` · `201` · `404` totem desconhecido · `422` inválido |
+| `GET` | `/comandos?limite=&dispositivo=&situacao=` | Comandos, mais recentes primeiro |
+| `GET` | `/comandos/{id}` | Um comando, com a situação e o retrato do totem após a execução |
+| `GET` | `/dispositivos/{dispositivo}/comandos/proximo` | **ESP32**: `{"comando": {id, tipo, parametros, tentativa}}` ou `{"comando": null}`; busca O(1) |
+| `POST` | `/comandos/{id}/confirmacao` | **ESP32**: `{dispositivo, resultado: executado\|falhou, detalhe?, estado?}` · `200` (idempotente) · `404` · `409` outro totem ou não entregue |
 
 ### Validação
 
@@ -51,6 +56,13 @@ O banco é a fonte da verdade; as tabelas hash são índices em memória carrega
 | `idx_dispositivos` | identificador → boot, último `seq`, senhas recebidas no boot | Detectar reboot e pacotes perdidos (lacuna de `seq`); conciliar os totais do `status` |
 | `idx_senhas_ativas` | (dispositivo, código) → id da senha aguardando | Achar a senha a cancelar sem varrer a tabela |
 | `idx_saldos` | (dispositivo, categoria) → saldo | `GET /saldos/{dispositivo}` |
+| `idx_comandos` | identificador → `deque` FIFO de comandos abertos | Consulta do ESP32 a cada 2 s sem tocar no banco quando não há comando; entrega só a cabeça da fila |
+
+### Comandos
+
+Tipos: `travar`, `liberar_trava`, `acionar_alarme` (`duracao_s` 1–60, padrão 10), `silenciar_alarme`, `resetar_contador`. `validade_s` (5–3600, padrão 60) é o prazo para o totem buscar o comando.
+
+Situações: `pendente` → `entregue` → `executado` | `falhou`. Um comando não buscado na validade vira `expirado`; um entregue 3 vezes sem confirmação (10 s cada) vira `sem_resposta`, e uma confirmação tardia ainda é aceita. Toda mudança fica na auditoria (`comando_criado`, `comando_entregue`, `comando_executado`, `comando_falhou`, `comando_expirado`, `comando_sem_resposta`). Uma tarefa da API varre os comandos a cada 2 s, para expirar também os de totens desligados. Os comandos abertos são recarregados do banco quando a API reinicia.
 
 ### Atomicidade
 
@@ -64,6 +76,7 @@ Pacotes com estas situações são aceitos (`201`, para não travar a fila do fi
 |---|---|
 | `dispositivo_novo` | Primeiro pacote de um `DISPOSITIVO_ID` |
 | `novo_boot` | Pacote `inicio` ou `seq` que voltou ao começo (o firmware zera `seq` e os contadores a cada boot) |
+| `contador_resetado` | Pacote `inicio` com `motivo: "resetar_contador"`: sessão nova aberta pelo comando do dashboard |
 | `seq_lacuna` | `seq` pulou números: pacotes perdidos |
 | `senha_repetida` | Código já aguardando (ex.: N001 de novo após um reboot) |
 | `cancelamento_sem_emissao` | Cancelamento de uma senha que o servidor nunca recebeu; o saldo não muda |
@@ -77,7 +90,9 @@ cd backend
 python -m pytest -q
 ```
 
-Cobrem validação, idempotência, saldo, reboot e lacuna de `seq`, conciliação, **rollback completo numa falha simulada no meio da transação**, imutabilidade do livro-razão e da auditoria, 4 totens gravando em paralelo sem perder incrementos e a recarga dos índices quando o servidor reinicia.
+Cobrem validação, idempotência, saldo, reboot e lacuna de `seq`, conciliação, **rollback completo numa falha simulada no meio da transação**, imutabilidade do livro-razão e da auditoria, 4 totens gravando em paralelo sem perder incrementos e a recarga dos índices quando o servidor reinicia. [`tests/test_comandos.py`](tests/test_comandos.py) cobre os comandos: ordem FIFO, um por vez, confirmação idempotente, expiração (com relógio controlado), reentrega e `sem_resposta`, recarga após reinício e o reset de contador como sessão nova.
+
+O teste do fluxo completo (firmware + API + banco + dashboard) fica em [`e2e/`](../e2e/README.md).
 
 Teste rápido com `curl` (API rodando):
 ```bash

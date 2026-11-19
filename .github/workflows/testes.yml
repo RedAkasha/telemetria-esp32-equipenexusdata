@@ -1,0 +1,32 @@
+# Testes automáticos a cada push e pull request:
+#   - firmware: sintaxe aceita pelo compilador do MicroPython (mpy-cross)
+#   - backend: API, banco e tabela hash (pytest)
+#   - e2e: firmware real no ESP32 virtual + API + SQLite + dashboard Streamlit
+name: Testes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15          # um travamento vira falha, nunca um job parado
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependências
+        run: pip install -r backend/requirements.txt -r dashboard/requirements.txt mpy-cross
+      - name: Firmware compila no MicroPython (mpy-cross)
+        run: |
+          for f in firmware/boot.py firmware/main.py firmware/estruturas.py firmware/ssd1306.py; do
+            python -m mpy_cross "$f" -o /tmp/$(basename "$f" .py).mpy
+          done
+      - name: Backend (API, banco, tabela hash, comandos)
+        run: python -m pytest backend/tests -v
+      - name: End-to-end (firmware + API + banco + dashboard)
+        run: python -m pytest e2e -v
