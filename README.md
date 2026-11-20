@@ -71,7 +71,13 @@ Como o firmware reenvia o pacote quando não recebe 2xx, a API é **idempotente*
 
 [`dashboard/app.py`](dashboard/app.py) lê o banco **direto** (somente leitura, modo WAL) e se atualiza sozinho a cada 2 s (`st.fragment(run_every=…)`): online/offline, trava e alarme, sessão, RSSI, memória, fila offline do ESP32, senhas em espera por categoria, gráficos e auditoria. Detalhes em [`dashboard/README.md`](dashboard/README.md).
 
-![Dashboard em tempo real (dados do ESP32 virtual)](docs/img/dashboard_tempo_real.png)
+Prints com o **ESP32 de verdade** (`esp32-nexus-01`) na rede do campus:
+
+| Painel de comandos | Telemetria ao vivo |
+|---|---|
+| ![Painel de comandos do dashboard: liberar trava, travar, alarme com duração, silenciar e resetar contador](docs/img/dashboard_tempo_real1.png) | ![Totem online, saldos da fila e gráficos de senhas por minuto, RSSI e fila offline](docs/img/dashboard_tempo_real2.png) |
+
+![Senhas aguardando, últimos pacotes, comandos executados e alertas da auditoria](docs/img/dashboard_tempo_real3.png)
 
 Os **comandos** fazem o caminho inverso. O ESP32 não recebe conexões, então ele **consulta** a API a cada 2 s:
 
@@ -179,7 +185,10 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
    pip install -r requirements.txt
    python -m api
    ```
-   Ela cria o banco `backend/nexus.db` a partir de `database/schema.sql` e mostra o `API_URL` a usar. Saldos e auditoria em `http://localhost:5000/docs`. (O servidor de teste antigo continua disponível: `python backend/servidor_teste.py`.) Confira com `ipconfig` que é o IPv4 do adaptador **Wi-Fi** e libere o Python no firewall.
+   Ela cria o banco `backend/nexus.db` a partir de `database/schema.sql` e mostra o `API_URL` a usar. Saldos e auditoria em `http://localhost:5000/docs`. (O servidor de teste antigo continua disponível: `python backend/servidor_teste.py`.) Confira com `ipconfig` que é o IPv4 do adaptador **Wi-Fi** e libere a porta 5000 no firewall (PowerShell **como administrador**; sem isso o ESP32 recebe `ETIMEDOUT`):
+   ```powershell
+   New-NetFirewallRule -DisplayName "NEXUS API 5000" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow -Profile Any
+   ```
 4. **Configuração:** copie `firmware/config_exemplo.py` para `firmware/config.py` e preencha `WIFI_SSID`, `WIFI_SENHA` (rede **2,4 GHz**) e `API_URL`.
    > ⚠️ O `config.py` está no `.gitignore`: **nunca** faça commit da senha do Wi-Fi.
 5. **Enviar para a placa** `boot.py`, `config.py`, `estruturas.py`, `ssd1306.py` e `main.py`:
@@ -197,6 +206,23 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 
 **Sem placa?** No [Wokwi](https://wokwi.com/esp32), crie um projeto ESP32 + MicroPython, adicione `boot.py`, `estruturas.py`, `ssd1306.py` e `main.py` e use as peças e ligações de [`firmware/wokwi/diagram.json`](firmware/wokwi/diagram.json). Mantenha a linha da placa do seu projeto, que define a versão do MicroPython. Sem `config.py`, o firmware usa a rede `Wokwi-GUEST` e envia para `http://httpbin.org/post`. Nesse modo os comandos do dashboard ficam desligados (o httpbin não é a API); para testar comandos sem placa, use `python -m simulador`. Projeto da equipe: https://wokwi.com/projects/479258817358709761
 
+## 🔬 Validação na placa real
+
+Roteiro executado em 19/11/2026 com o ESP32 AM-032 e a API num notebook, na mesma rede Wi-Fi do campus (ESP32 em `172.26.66.199`, API em `172.26.68.5:5000`). Os prints estão em [Evidências](#-evidências).
+
+| # | Teste | Resultado |
+|---|---|---|
+| 1 | **Fila offline** com a API inalcançável | Cada envio falhou com `ETIMEDOUT` e o totem seguiu rodando; os pacotes de `status` acumularam na fila de contingência (`fila=1` → `fila=20`). Liberada a conexão, a fila foi reenviada **em ordem**, 5 por ciclo (`16 → 11 → 6 → 2 → 0`). O gráfico "Fila offline do ESP32" do dashboard mostra o pico de 20 e a volta a zero |
+| 2 | **Senhas pelos botões** | N001–N004 e P001–P003 emitidas (7); P002 cancelada segurando o botão 2 s. O dashboard mostrou 4 convencionais + 2 prioritárias em espera, as prioritárias no topo da lista, e as senhas por minuto separadas por categoria |
+| 3 | **Comandos do dashboard** | Travar, Liberar trava, Acionar alarme (10 s, duas vezes) e Resetar contador: todos ✅ **executado** pela placa |
+| 4 | **Reset de contador** | Sessão 1 → 2 no painel e evento `contador_resetado` na auditoria |
+| 5 | **API desligada e religada** | Os pacotes guardados chegaram juntos assim que a API voltou (8 `POST /leituras` → `201` seguidos, vindos de `172.26.66.199`); depois o totem voltou a consultar comandos a cada 2 s |
+| 6 | **Telemetria** | Totem `online`, RSSI entre −58 e −66 dBm, ~93 KB de memória livre, atualização a cada 2 s |
+
+**Lição de bancada:** o ESP32 recebia `ETIMEDOUT` mesmo com o IP certo no `config.py`. As causas eram a API desligada e o Firewall do Windows, que descarta conexões de entrada em redes classificadas como públicas. Com a API no ar e a porta 5000 liberada (passo 3 de [Como executar](#-como-executar)), a conexão funcionou.
+
+Além da placa, o fluxo completo roda automaticamente a cada push no GitHub Actions: firmware compilado pelo `mpy-cross`, 44 testes do backend e 10 cenários end-to-end ([`e2e/`](e2e/README.md)).
+
 ## 📸 Evidências
 
 > Como produzir e publicar estas imagens: [`docs/guia_imagens.md`](docs/guia_imagens.md).
@@ -204,18 +230,24 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 ### Circuito montado na bancada
 ![Circuito montado na bancada](docs/img/circuito_bancada.jpg)
 
-<!-- Ao salvar cada arquivo em docs/img/, apague as linhas de abertura e fechamento de comentário da seção correspondente. -->
-
-<!--
 ### Totem funcionando
-![Botões emitindo senhas e display mostrando a senha atual](docs/img/circuito_funcionando.gif)
--->
+<img src="docs/img/circuito_funcionando.gif" alt="Botões emitindo senhas e display mostrando a senha atual" width="360">
 
-### Envio dos pacotes JSON (REPL do ESP32)
+### Fila de contingência na placa real (REPL)
+Com a API inalcançável, cada envio falha com `ETIMEDOUT` e a fila cresce até 20 pacotes; quando a conexão volta, ela é esvaziada em ordem, 5 pacotes por ciclo.
+
+![Shell do Thonny: falhas ETIMEDOUT, fila subindo até 20 e depois 16, 11, 6, 2, 0 pendentes](docs/img/evidencia_fila_offline_placa.png)
+
+### Pacotes recebidos pela API
+Ao religar a API, os pacotes guardados no ESP32 (`172.26.66.199`) chegam juntos com `201 Created`; em seguida o totem volta a consultar comandos.
+
+![Terminal da API: POST /leituras 201 vindos do ESP32 e consultas GET de comandos](docs/img/evidencia_servidor.png)
+
+### Envio dos pacotes JSON (entrega anterior, servidor de teste)
 ![REPL mostrando os pacotes enviados e a fila de contingência esvaziando](docs/img/evidencia_envio_repl.png)
 
-### Pacotes recebidos pelo servidor de teste
-![Terminal do servidor de teste com as respostas 201](docs/img/evidencia_servidor.png)
+### Dashboard
+Prints na seção [Dashboard e comandos](#-dashboard-e-comandos).
 
 ### Conexão Wi-Fi (simulador Wokwi)
 ![REPL do Wokwi mostrando o IP obtido](docs/evidencia_wifi.jpg)
@@ -235,4 +267,6 @@ O `timestamp` é gerado na **coleta**, com o relógio acertado via NTP: um pacot
 - [x] Dashboard Streamlit conectado ao banco, com a telemetria em tempo real
 - [x] Comandos do dashboard para o ESP32: travar/liberar, acionar/silenciar alarme, resetar contador
 - [x] Teste end-to-end do fluxo completo, sem travamentos (`e2e/`, também no GitHub Actions)
+- [x] Validação na placa real: senhas, comandos, reset e fila offline com o ESP32 e o dashboard
+- [x] Evidências: foto, GIF do totem, fila offline no REPL, pacotes chegando na API e prints do dashboard
 - [ ] Fila de prioridade para a chamada das senhas
